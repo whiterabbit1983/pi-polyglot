@@ -1,0 +1,9 @@
+syntax = "proto3";
+package pi.polyglot.v1;
+
+// The transport preserves the language-neutral JSON-RPC contract.
+// Dynamic tool schemas and arguments do not require regenerated bindings.
+message Frame { string json = 1; }
+service Extension {
+  rpc Connect(stream Frame) returns (stream Frame);
+}

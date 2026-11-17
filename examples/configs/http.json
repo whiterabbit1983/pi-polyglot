@@ -1,0 +1,20 @@
+{
+  "version": 1,
+  "extensions": [
+    {
+      "id": "demo",
+      "transport": "http",
+      "permissions": [
+        "ui.notify",
+        "ui.confirm"
+      ],
+      "hooks": [
+        "session_start",
+        "before_agent_start",
+        "tool_call"
+      ],
+      "url": "http://127.0.0.1:8765",
+      "tokenEnv": "POLYGLOT_TOKEN"
+    }
+  ]
+}

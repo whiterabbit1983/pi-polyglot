@@ -1,0 +1,14 @@
+node_modules/
+.env
+.env.*
+!.env.example
+*.log
+.DS_Store
+coverage/
+*.tsbuildinfo
+examples/python/.venv/
+__pycache__/
+*.pyc
+target/
+examples/go/bin/
+.polyglot-local.json

@@ -1,0 +1,33 @@
+{
+  "name": "pi-polyglot",
+  "version": "0.1.0",
+  "description": "Language-neutral Pi extensions over stdio, HTTP/SSE and gRPC",
+  "type": "module",
+  "license": "MIT",
+  "private": true,
+  "repository": { "type": "git", "url": "https://github.com/whiterabbit1983/pi-polyglot.git" },
+  "keywords": ["pi-package", "pi", "extensions", "polyglot", "grpc"],
+  "peerDependencies": { "@earendil-works/pi-coding-agent": "*", "typebox": "*" },
+  "engines": { "node": ">=22" },
+  "pi": { "extensions": ["./src/index.ts"] },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "node --import tsx --test test/*.test.ts",
+    "test:matrix": "node --import tsx scripts/matrix.ts",
+    "test:pi": "node --import tsx scripts/pi-smoke.ts",
+    "example:ts": "tsx examples/typescript/server.ts"
+  },
+  "dependencies": {
+    "@grpc/grpc-js": "^1.14.0",
+    "@grpc/proto-loader": "^0.8.0",
+    "ajv": "^8.17.1",
+    "zod": "^4.0.0"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-coding-agent": "1.5.2",
+    "@types/node": "^22.0.0",
+    "tsx": "^4.20.0",
+    "typebox": "^1.0.0",
+    "typescript": "^5.9.0"
+  }
+}

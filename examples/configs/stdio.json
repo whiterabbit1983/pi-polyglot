@@ -1,0 +1,27 @@
+{
+  "version": 1,
+  "extensions": [
+    {
+      "id": "demo",
+      "transport": "stdio",
+      "permissions": [
+        "ui.notify",
+        "ui.confirm"
+      ],
+      "hooks": [
+        "session_start",
+        "before_agent_start",
+        "tool_call"
+      ],
+      "command": "node",
+      "args": [
+        "--import",
+        "tsx",
+        "examples/typescript/server.ts",
+        "--transport",
+        "stdio"
+      ],
+      "cwd": "../.."
+    }
+  ]
+}

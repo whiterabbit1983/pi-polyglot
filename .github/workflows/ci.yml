@@ -1,0 +1,48 @@
+name: CI
+on:
+  push:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.23.x'
+          cache: false
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install adapter dependencies
+        run: npm ci --ignore-scripts
+      - name: Typecheck and adapter tests
+        run: npm run typecheck && npm test
+      - name: Build and test Python example
+        working-directory: examples/python
+        run: |
+          python -m venv .venv
+          .venv/bin/python -m pip install -r requirements.lock
+          .venv/bin/python -m unittest discover -s tests -v
+          .venv/bin/python -m pip check
+      - name: Build and test Go example
+        working-directory: examples/go
+        run: make deps build test check
+      - name: Build and test Rust example
+        working-directory: examples/rust
+        run: |
+          cargo build --locked
+          cargo test --locked
+          cargo fmt --check
+      - name: All 12 language/transport combinations
+        run: npm run test:matrix
+      - name: Real Pi RPC smoke without a model
+        run: npm run test:pi
