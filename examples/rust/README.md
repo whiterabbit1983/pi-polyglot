@@ -131,6 +131,39 @@ responses under the string-ID contract. Unknown or late reverse responses are
 ignored after envelope validation. Peer-controlled UI error text is not reflected
 into results, and credentials are never included in protocol output.
 
+## Opt-in hybrid TUI (`tui_v1`)
+
+The base wire version stays `0.1`. Add `ui.custom` to this service's permissions
+in the adapter configuration. Only then does the host add
+`optionalFeatures: ["tui_v1"]` and `ui: {timeoutMs: ...}` to initialize.
+This example selects `features: ["tui_v1"]` and adds two commands only when the
+feature is offered. The legacy handshake/catalog stays unchanged without opt-in.
+See the [hybrid TUI contract](../../docs/tui-protocol.md).
+
+- **`ui_form`** combines a styled frame, Name input, Target select, and Deploy
+  button. Pi handles field editing, focus, selection, and submission locally;
+  editing and submission do not wait for a server round trip.
+- **`ui_counter`** starts at count 0, revision 0. Up/down send full replacement
+  documents with increasing revisions. Enter sends `host.ui.close` with
+  `{count: ...}`. Escape cancels either view locally.
+- Both commands await `host.ui.open` until the view closes, then return
+  `UI result: ` plus the JSON-encoded open result, including cancellation.
+
+`src/ui.rs` handles concurrent `ui.event` requests while the command awaits open.
+Each view gets a generated ID and retains the actual command `parentRequestId`,
+never the event request ID. Event payloads/revisions are validated; stale or
+foreign views are rejected. Resize and valid local field-change events receive
+`{}` without redrawing. View/callback guards clean state on completion, timeout,
+cancellation, or disconnect. A close acknowledgement can follow open completion.
+
+The offered `ui.timeoutMs` bounds both command and open handlers on negotiated
+connections. Configure the host's `uiTimeoutMs` (default 300000 ms, supported
+range 1000–900000 ms). Tool and hook deadlines do not change. Custom UI requires
+interactive Pi TUI; RPC/print/headless mode returns unavailable. The host enforces
+one active view across its adapter process. All three transports share the same
+UI handlers. These demos do not provide terminal emulation, mouse support, or
+remote executable widgets.
+
 ## Concurrency, limits, and shutdown
 
 `src/protocol.rs` owns the connection state. Its reader dispatches independent
@@ -149,8 +182,8 @@ Limits are intentional and can be changed in the Rust sources:
 | Host request ID history | 4096 per connection; duplicate IDs or exhaustion close it |
 | HTTP sessions / gRPC streams | 32 per server; excess gets HTTP 503 / gRPC RESOURCE_EXHAUSTED |
 | Queue/output I/O wait | 5 seconds; a stalled connection is closed |
-| Reverse UI request | 10 seconds |
-| Tool / command / hook handler | 30 seconds |
+| Reverse UI request | 10 seconds; negotiated `host.ui.open` uses `ui.timeoutMs` |
+| Tool / command / hook handler | 30 seconds; commands with negotiated `tui_v1` use `ui.timeoutMs` |
 | HTTP session without SSE | 30 seconds |
 | HTTP session total lifetime | 15 minutes |
 
@@ -193,6 +226,12 @@ explicit host opt-in. Adding a fourth hook requires a coordinated protocol
 change, not just a catalog edit.
 
 ## Test coverage and limitations
+
+`src/ui_tests.rs` adds mock UI host tests for opt-in/legacy negotiation,
+concurrent counter events, parent correlation, increasing revisions, local form
+results, invalid/stale events, Escape, timeout, cancellation, disconnect,
+unavailable-host errors, and retained-state cleanup. These do not render a real
+terminal; the shared UI matrix and Pi PTY smoke are separate integration checks.
 
 `cargo test --locked --all-targets` runs protocol/unit tests plus real-process
 smoke tests for all 3 transports. Coverage includes the catalog, reverse confirm

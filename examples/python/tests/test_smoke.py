@@ -15,6 +15,7 @@ import grpc
 from polyglot_example.core import MAX_FRAME, decode, encode
 from polyglot_example.generated import extension_pb2, extension_pb2_grpc
 from test_core import INIT, request, tool
+from test_ui import exercise_ui
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -220,6 +221,18 @@ class SmokeTests(unittest.IsolatedAsyncioTestCase):
         process, _ = await self.start("stdio")
         await self.exercise(await self.stdio_client(process))
         self.assertEqual(await asyncio.wait_for(process.wait(), 5), 0)
+
+    async def test_ui_stdio(self):
+        process, _ = await self.start("stdio")
+        await exercise_ui(self, await self.stdio_client(process))
+
+    async def test_ui_http(self):
+        _, port = await self.start("http")
+        await exercise_ui(self, await self.http_client(port))
+
+    async def test_ui_grpc(self):
+        _, port = await self.start("grpc")
+        await exercise_ui(self, await self.grpc_client(port))
 
     async def test_stdio_eof_cancels_pending_callback(self):
         process, _ = await self.start("stdio")

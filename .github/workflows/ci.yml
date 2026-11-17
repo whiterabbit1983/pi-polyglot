@@ -44,5 +44,9 @@ jobs:
           cargo fmt --check
       - name: All 12 language/transport combinations
         run: npm run test:matrix
+      - name: Hybrid UI in all 12 language/transport combinations
+        run: npm run test:ui
       - name: Real Pi RPC smoke without a model
         run: npm run test:pi
+      - name: Real Pi interactive PTY smoke without a model
+        run: npm run test:tui

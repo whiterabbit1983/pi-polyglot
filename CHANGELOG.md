@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.2.0]
+
+Hybrid TUI, opt-in through `ui.custom` and negotiated `tui_v1`:
+
+- Safe remote text frames and native local input/select/button controls in the same document, plus bounded read-only tables and trees.
+- Temporary inline screens and overlays, keyboard/paste, local focus/cursor, resize events and semantic theme styles.
+- Command-scoped `host.ui.open/update/close`, revision fencing, local Escape and separate interaction deadlines.
+- One global custom-view slot, bounded/coalesced event dispatch, teardown on parent cancellation, disconnect, timeout or UI failure.
+- Form and remote-counter demos in Python, Go, TypeScript and Rust, over every transport; legacy catalogs are unchanged without opt-in.
+- Component, security, lifetime and transport integration tests; real Pi interactive PTY smoke without inference.
+
+Base wire remains 0.1. Custom UI requires interactive TUI mode and a command parent; it is unavailable in RPC/print/headless modes and from tools/hooks. This does not execute arbitrary TypeScript components or terminal applications. Mouse, remote cursor primitives, multiline editors and persistent UI surfaces remain out of scope.
+
 ## [0.1.0]
 
 Initial experimental implementation:

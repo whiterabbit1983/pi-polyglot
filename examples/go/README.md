@@ -133,6 +133,40 @@ Malformed envelopes close the connection rather than generating a forbidden
 null-ID response. Late callback responses are ignored. No token or host callback
 error details are included in diagnostics, results, or progress.
 
+## Opt-in hybrid TUI (`tui_v1`)
+
+The base wire version stays `0.1`. In the adapter configuration, add
+`ui.custom` to this service's permissions. Only then does the host offer
+`optionalFeatures: ["tui_v1"]` and `ui: {timeoutMs: ...}` during initialize.
+This example selects `features: ["tui_v1"]` and adds two commands only when the
+feature is offered. Without opt-in, the legacy handshake/catalog is unchanged.
+See the [hybrid TUI contract](../../docs/tui-protocol.md).
+
+- **`ui_form`** opens a mixed frame/input/select/button deployment form.
+  Name editing, target selection, focus, and submission happen locally in Pi;
+  no server round trip is needed for editing or pressing the Deploy button.
+- **`ui_counter`** opens a frame-only counter at 0, revision 0. Up/down change
+  the count and send full documents with increasing revisions. Enter sends
+  `host.ui.close` with `{count: ...}`. Escape cancels either view locally.
+- Both commands await `host.ui.open` until it closes, then return
+  `UI result: ` followed by the JSON-encoded open result, including cancellation.
+
+The host sends `ui.event` requests concurrently while the command waits.
+`ui.go` retains the actual command ID as `parentRequestId`, generates a separate
+view ID, validates event payloads/revisions, and rejects stale or foreign views.
+Resize and valid local field-change events return `{}` without redrawing.
+Completion, cancellation, timeout, and connection loss remove view state and
+pending open callbacks. A close acknowledgement may arrive after open completes.
+
+The offered `ui.timeoutMs` bounds both commands and open requests on negotiated
+connections. The host default is 300000 ms, with a supported range of
+1000–900000 ms; configure it with `uiTimeoutMs`. Other callback deadlines remain
+unchanged. Custom UI requires interactive Pi TUI: RPC/print/headless mode is
+unavailable, not an implicit success. The host enforces one active view across
+its adapter process. These are document-based demos, not arbitrary terminal
+emulation, mouse support, or remote executable widgets. All three transports use
+the same handlers.
+
 ## Concurrency and limits
 
 Transport readers never wait for tool handlers or UI callbacks. A bounded worker
@@ -149,7 +183,8 @@ Development limits are explicit:
 | Outbound frames per connection | 64 |
 | HTTP sessions / authenticated gRPC streams | 128 each |
 | Unique request IDs per connection | 4096 |
-| Reverse-call timeout | 30 seconds |
+| Reverse-call timeout | 30 seconds; negotiated `host.ui.open` uses `ui.timeoutMs` |
+| Commands with negotiated `tui_v1` | `ui.timeoutMs` |
 | HTTP session without an event consumer | 30 seconds |
 | HTTP SSE write deadline | 10 seconds per write |
 
@@ -190,7 +225,12 @@ modes and verify that a second session works after protocol shutdown. Additional
 tests cover required authentication, single-consumer SSE, deletion, stream loss,
 frame and queue bounds, concurrent-handler limits, session isolation, stale
 callbacks, notification silence, invalid parameters, and protobuf wire format.
-The race detector checks concurrent access.
+The race detector checks concurrent access. `ui_test.go` adds a mock UI host:
+opt-in/legacy negotiation, concurrent counter events, command parent correlation,
+increasing revisions, local form results, invalid/stale events, Escape, timeout,
+cancellation, disconnect, unavailable-host errors, and retained-state cleanup.
+These unit tests do not render a real terminal; the shared UI matrix and Pi PTY
+smoke provide separate integration checks.
 
 These tests do not load Pi itself, call a model, or test deployment TLS. Host
 integration with Pi 1.5.2 belongs to the repository's integration runner. Linux

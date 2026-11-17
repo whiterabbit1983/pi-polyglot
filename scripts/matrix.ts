@@ -7,9 +7,11 @@ import { existsSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
 import { Bridge, type HostContext } from '../src/bridge.ts';
 import { connectionSchema } from '../src/config.ts';
+import { fakeTui, until } from '../test/helpers/tui.ts';
 
 const root = fileURLToPath(new URL('../', import.meta.url));
-const selected = process.argv.slice(2);
+const withUi = process.argv.includes('--ui');
+const selected = process.argv.slice(2).filter(arg => arg !== '--ui');
 const languages = selected.length ? selected : ['typescript', 'python', 'go', 'rust'];
 process.env.POLYGLOT_TOKEN = randomBytes(24).toString('hex');
 const pause = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
@@ -63,7 +65,7 @@ for (const language of languages) {
         await ready(port, server);
       }
       const config = connectionSchema.parse({
-        id: language, transport, permissions: ['ui.notify', 'ui.confirm'], hooks: ['session_start', 'before_agent_start', 'tool_call'], timeoutMs: 4000,
+        id: language, transport, permissions: ['ui.notify', 'ui.confirm', ...(withUi ? ['ui.custom'] : [])], hooks: ['session_start', 'before_agent_start', 'tool_call'], timeoutMs: 4000, uiTimeoutMs: 5000,
         ...(transport === 'stdio' ? { command, args: [...args, '--transport', 'stdio'], cwd: root }
           : transport === 'http' ? { url: `http://127.0.0.1:${port}`, tokenEnv: 'POLYGLOT_TOKEN' }
           : { address: `127.0.0.1:${port}`, tls: false, tokenEnv: 'POLYGLOT_TOKEN' }),
@@ -93,6 +95,25 @@ for (const language of languages) {
       const declined = { ...ctx, ui: { ...ctx.ui, confirm: async () => false } } as HostContext;
       await assert.rejects(bridge.callTool('greet', { name: 'No' }, declined));
       assert.equal((await bridge.command('hello', 'healthy', ctx)).text, 'Hello, healthy!');
+      if (withUi) {
+        assert.equal(bridge.customUiEnabled, true);
+        const tui = fakeTui();
+        const form = bridge.command('ui_form', '', tui.ctx); void form.catch(() => {});
+        await until(() => tui.active);
+        tui.input('X'); tui.input('\t'); tui.input('\x1b[B'); tui.input('\t'); tui.input('\r');
+        const result = JSON.parse((await form).text!.slice('UI result: '.length));
+        assert.deepEqual(result, { cancelled: false, result: { action: 'submit', values: { name: 'AdaX', target: 'prod' } } });
+        const counter = bridge.command('ui_counter', '', tui.ctx); void counter.catch(() => {});
+        await until(() => tui.active);
+        tui.input('\x1b[A');
+        await until(() => tui.lines.some(line => /Count(?:er)?: 1\b/.test(line)));
+        tui.resize(20, 12); tui.input('\r');
+        assert.deepEqual(JSON.parse((await counter).text!.slice(11)), { cancelled: false, result: { count: 1 } });
+        const cancelled = bridge.command('ui_counter', '', tui.ctx); void cancelled.catch(() => {});
+        await until(() => tui.active); tui.input('\x1b');
+        assert.equal(JSON.parse((await cancelled).text!.slice(11)).cancelled, true);
+        await assert.rejects(bridge.command('ui_form', '', { ...tui.ctx, mode: 'rpc' }));
+      }
       if (transport !== 'stdio') {
         const other = await Bridge.connect(config, root); bridges.push(other);
         await bridge.shutdown();
@@ -101,7 +122,7 @@ for (const language of languages) {
         await assert.rejects(Bridge.connect({ ...config, tokenEnv: 'POLYGLOT_BAD_TOKEN' } as typeof config, root),
           error => error instanceof Error && !error.message.includes('deadline'));
       }
-      cases++; console.log(`PASS ${language}/${transport}: handshake, Unicode, callbacks, command, hooks, progress, cancellation, validation, health${transport === 'stdio' ? '' : ', isolation, auth'}`);
+      cases++; console.log(`PASS ${language}/${transport}${withUi ? ' + hybrid UI' : ''}: handshake, Unicode, callbacks, command, hooks, progress, cancellation, validation, health${transport === 'stdio' ? '' : ', isolation, auth'}`);
     } catch (error) {
       // The runner uses only synthetic credentials; diagnostics are useful for local test failures.
       console.error(`FAIL ${language}/${transport}: ${error instanceof Error ? error.message : error}`);

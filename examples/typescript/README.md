@@ -46,13 +46,35 @@ Declare a command in `catalog.commands`, then implement `command.execute`. The r
 
 Declare supported hooks in `catalog.hooks` and explicitly permit them in the host configuration. The example returns `{}` for all 3 hooks. To add context, `before_agent_start` can return `{systemPrompt: '...'}`. This **replaces** the chained system prompt; use the incoming `event.systemPrompt` deliberately. `tool_call` can return `{block:true,reason:'...'}`. The bridge exposes no general JavaScript evaluation or filesystem API.
 
+## Hybrid TUI
+
+Use `examples/configs/tui-stdio.json`, `tui-http.json` or `tui-grpc.json` instead of the base config. These grant `ui.custom`; normal initialization without that permission and feature offer retains the old catalog.
+
+```sh
+PI_POLYGLOT_CONFIG="$PWD/examples/configs/tui-stdio.json" pi -e ./src/index.ts
+```
+
+Run `/pg_demo_ui_form` or `/pg_demo_ui_counter` in interactive Pi. RPC/print/headless is intentionally unsupported. The form combines a server frame, local native input, select and button. Tab moves focus; Enter on the button submits. The counter handles remote Up/Down events and updates frames; Enter closes with a count. Escape always cancels locally.
+
+`ui-demo.ts` implements both commands using the [TUI protocol](../../docs/tui-protocol.md). There is no Pi TUI import in the service. To build your own interface:
+
+1. Select `tui_v1` only when offered. Use `ui.timeoutMs` for UI commands/open calls, not unbounded waits.
+2. Inside a command, allocate a view ID and retain the actual command ID.
+3. Send `host.ui.open` with a document; keep handling `ui.event` requests while it waits.
+4. For server-side state changes, send a new document with a strictly increasing revision. Do not overwrite local fields by changing their IDs unless a reset is intended.
+5. Close with `host.ui.close`, or use a local button. Remove service-side state in `finally`, even on cancellation/disconnect.
+
+The open response is returned as `UI result: <JSON>` for easy inspection. Events contain the actual command `parentRequestId`; their own RPC ID is not authority to open another view. Semantic spans are plain text plus styles, never raw ANSI. Remote applications do not own terminal modes or stdin.
+
 ## Test
 
 ```sh
 npm run typecheck
 npm test
 npm run test:matrix -- typescript
+npm run test:matrix -- --ui typescript
 npm run test:pi
+npm run test:tui
 ```
 
 The HTTP example limits sessions, queued writes and request sizes, and expires orphan sessions with no SSE consumer after 30 seconds. A connected idle SSE consumer stays valid. This is a development policy, not a durable reconnect mechanism. Every gRPC stream is a separate connection. Shutdown closes that connection, not the whole network server.

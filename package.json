@@ -1,13 +1,13 @@
 {
   "name": "pi-polyglot",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Language-neutral Pi extensions over stdio, HTTP/SSE and gRPC",
   "type": "module",
   "license": "MIT",
   "private": true,
   "repository": { "type": "git", "url": "https://github.com/whiterabbit1983/pi-polyglot.git" },
   "keywords": ["pi-package", "pi", "extensions", "polyglot", "grpc"],
-  "peerDependencies": { "@earendil-works/pi-coding-agent": "*", "typebox": "*" },
+  "peerDependencies": { "@earendil-works/pi-coding-agent": "*", "@earendil-works/pi-tui": "*", "typebox": "*" },
   "engines": { "node": ">=22" },
   "pi": { "extensions": ["./src/index.ts"] },
   "scripts": {
@@ -15,6 +15,8 @@
     "test": "node --import tsx --test test/*.test.ts",
     "test:matrix": "node --import tsx scripts/matrix.ts",
     "test:pi": "node --import tsx scripts/pi-smoke.ts",
+    "test:ui": "node --import tsx scripts/matrix.ts --ui",
+    "test:tui": "python3 scripts/tui-smoke.py",
     "example:ts": "tsx examples/typescript/server.ts"
   },
   "dependencies": {
@@ -25,6 +27,7 @@
   },
   "devDependencies": {
     "@earendil-works/pi-coding-agent": "1.5.2",
+    "@earendil-works/pi-tui": "1.5.2",
     "@types/node": "^22.0.0",
     "tsx": "^4.20.0",
     "typebox": "^1.0.0",

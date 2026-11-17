@@ -5,8 +5,9 @@ import { z } from 'zod';
 import { hooks, identifier, MAX_BYTES } from './protocol.ts';
 
 const common = {
-  id: identifier, permissions: z.array(z.enum(['ui.notify', 'ui.confirm'])).default([]),
+  id: identifier, permissions: z.array(z.enum(['ui.notify', 'ui.confirm', 'ui.custom'])).default([]),
   hooks: z.array(z.enum(hooks)).default([]), timeoutMs: z.number().int().min(100).max(120000).default(30000),
+  uiTimeoutMs: z.number().int().min(1000).max(900000).default(300000),
 };
 const envName = z.string().regex(/^[A-Za-z_][A-Za-z0-9_]*$/);
 export const connectionSchema = z.discriminatedUnion('transport', [

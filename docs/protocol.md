@@ -1,5 +1,7 @@
 # Pi Polyglot protocol 0.1
 
+Package 0.2 adds the optional [hybrid TUI feature `tui_v1`](tui-protocol.md) on this same base wire. Its extra initialization fields and custom UI methods are opt-in through `ui.custom`; legacy peers need no changes.
+
 This is a new protocol, not Octet, MCP or Pi RPC. External programs require no Pi SDK. JSON-RPC 2.0 messages use string IDs (1–128 characters), exactly one of result/error in a response, and LF framing on stdio. Errors have integer code and string message. Notifications omit id. UTF-8 frames are limited to 1 MiB. A connection handles both directions concurrently. Unknown methods return -32601, invalid params -32602, cancelled requests -32800, failed operations -32000. Do not send results for notifications. IDs are unique per sending peer, with host IDs prefixed `pi-` and service IDs prefixed `ext-`.
 
 ## Initialization
@@ -28,7 +30,7 @@ Tool schemas use this deliberately restricted JSON Schema subset: `type`, `descr
 
 ## Service → host requests
 
-Both require the corresponding local permission and a live parent request. They may occur while a host request is pending, so neither side may block its reader waiting for a callback.
+The base methods below require the corresponding local permission and a live parent request. The separately negotiated [custom UI methods](tui-protocol.md) additionally require an active command parent and interactive TUI mode. They may occur while a host request is pending, so neither side may block its reader waiting for a callback.
 
 - `host.ui.notify`: `{parentRequestId,message,level?:"info"|"warning"|"error"}` → `{}`.
 - `host.ui.confirm`: `{parentRequestId,title,message}` → `{confirmed:<boolean>}`. Unsupported UI or missing permission is an error, never implicit approval.

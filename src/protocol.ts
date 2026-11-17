@@ -21,6 +21,7 @@ export const toolResult = z.object({ content: textParts, details: z.record(z.str
 export const commandResult = z.object({ text: z.string().max(65536).optional() }).strict();
 export const catalogSchema = z.object({
   protocolVersion: z.literal(VERSION), name: identifier,
+  features: z.array(z.literal('tui_v1')).max(1).optional(),
   tools: z.array(z.object({
     name: identifier, description: z.string().min(1).max(4096),
     parameters: z.record(z.string(), z.unknown()).refine(v => v.type === 'object', 'Tool parameters must be an object schema'),

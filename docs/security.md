@@ -21,9 +21,17 @@ No automatic filesystem reads, shell execution, credential broker, message histo
 
 ## Reverse requests
 
-Only `host.ui.notify` and `host.ui.confirm` exist. Each requires a configured permission and the ID of an active request on the same connection. Pending IDs expire on result, error, cancellation, timeout and disconnect. A confirmation receives a combined cancellation signal from the parent and reverse request. Missing UI returns an error, not consent. A service cannot use an old parent to show a new dialog after completion.
+Base methods are `host.ui.notify` and `host.ui.confirm`. Package 0.2 adds optional `host.ui.open/update/close` behind both `ui.custom` permission and negotiated `tui_v1`. Each requires a configured permission and the ID of an active request on the same connection. Pending IDs expire on result, error, cancellation, timeout and disconnect. A confirmation receives a combined cancellation signal from the parent and reverse request. Missing UI returns an error, not consent. A service cannot use an old parent to show a new dialog after completion.
 
-Pi's own extension UI semantics still apply: supported RPC dialogs work; arbitrary terminal components do not. Notifications do not constitute approvals for OS effects.
+Pi's own extension UI semantics still apply: supported base RPC dialogs work; custom UI requires `mode === "tui"`. Custom views require a live `command.execute` parent, not a hook, tool, event or initialization parent. Notifications and a custom button labeled “approve” are not host-policy approval tokens for OS effects.
+
+## Hybrid TUI boundary
+
+The adapter—not the service—owns terminal rendering, local input and focus. Documents contain bounded plain text and semantic styles. Raw ESC/ANSI, C0/C1 and bidi override/isolate controls are rejected. Local paste is sanitized before rendering or forwarding. Styles are resolved against Pi's theme locally; no service JavaScript or terminal escape program executes.
+
+Only one view can own the adapter's UI slot. Each update/close checks connection, live parent and view ID. Increasing revision numbers prevent stale frames from replacing newer documents; surviving local control IDs/types preserve edits and focus. Input selection/typing/submission remains local; remote events have a bounded queue with resize/change coalescing and a short acknowledgement deadline. Failure/overflow closes the view rather than accumulating unlimited events.
+
+An interaction has a separate bounded `uiTimeoutMs` (1 second–15 minutes, default 5 minutes). It affects negotiated-UI commands and open requests only. The parent abort signal, reverse open cancellation, transport loss, session shutdown, local Escape and rendering failure dispose the view. A failed/rejected UI cannot leave the global slot locked. Persistent views, mouse, terminal emulation and arbitrary remote cursor-control sequences are not supported. This is still trusted UI content: a service can display misleading text, so do not treat its screen as a native security prompt.
 
 ## Network boundaries
 
@@ -50,6 +58,6 @@ Text results support at most 64 text parts and 262,144 characters per part, addi
 
 ## Validation scope
 
-Local tests exercise loopback transports and a real Pi 1.5.2 RPC session without inference. They do not certify Internet deployment, malicious-server resistance under sustained load, interactive TUI behavior, Windows cleanup, remote TLS certificates/proxies or other Pi versions. The language examples have independent transport implementations; passing shared happy/error-path tests is not a complete formal conformance suite.
+Local tests exercise loopback transports, a real Pi 1.5.2 RPC session and a POSIX PTY interactive smoke without inference. The PTY smoke covers the TypeScript stdio UI example, not every frontend/terminal/language/transport combination. Tests do not certify Internet deployment, malicious-server resistance under sustained load, Windows cleanup, remote TLS certificates/proxies or other Pi versions. The language examples have independent transport implementations; passing shared happy/error-path tests is not a complete formal conformance suite.
 
 When reporting a vulnerability, avoid attaching bearer tokens, real user prompts, filesystem contents or credentials. Do not publish a live exploit against someone else's service.

@@ -3,7 +3,11 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
+import uuid
 from typing import Any
+
+from .ui import UI_COMMANDS, View, counter_document, form_document, safe_text
 
 MAX_FRAME = 1024 * 1024
 MAX_PENDING = 32
@@ -90,6 +94,8 @@ class Connection:
         self.cancelled: set[str] = set()
         self.reverse: dict[str, tuple[str, asyncio.Future]] = {}
         self.permissions: set[str] = set()
+        self.ui_timeout: float | None = None
+        self.views: dict[str, View] = {}
         self.initialized = False
         self.closing = False
         self.closed = asyncio.Event()
@@ -166,7 +172,11 @@ class Connection:
             try:
                 if request_id in self.cancelled:
                     raise asyncio.CancelledError
-                result = await self.dispatch(request_id, method, params)
+                if method == "command.execute" and self.ui_timeout is not None:
+                    async with asyncio.timeout(self.ui_timeout):
+                        result = await self.dispatch(request_id, method, params)
+                else:
+                    result = await self.dispatch(request_id, method, params)
                 response = {"result": result}
                 shutdown = method == "shutdown"
             except asyncio.CancelledError:
@@ -204,17 +214,26 @@ class Connection:
     async def host_call(self, parent: str | None, method: str, params: dict) -> Any:
         if parent is None or parent not in self.requests:
             raise RPCError(-32000, "A live parent request is required")
-        if method.removeprefix("host.") not in self.permissions:
+        custom = method in {"host.ui.open", "host.ui.update", "host.ui.close"}
+        permission = "ui.custom" if custom else method.removeprefix("host.")
+        if permission not in self.permissions or (custom and self.ui_timeout is None):
             raise RPCError(-32000, "Required UI permission is missing")
+        if custom:
+            view = self.views.get(params.get("viewId"))
+            if view is None or view.parent != parent or parent in self.cancelled:
+                raise RPCError(-32001, "UI parent is no longer active")
         self.counter += 1
         request_id = f"ext-{self.counter}"
         future = asyncio.get_running_loop().create_future()
         self.reverse[request_id] = (parent, future)
+        if method == "host.ui.open":
+            view.open_request_id = request_id
+        timeout = self.ui_timeout if method == "host.ui.open" else CALL_TIMEOUT
         try:
             await self.send({"jsonrpc": "2.0", "id": request_id, "method": method,
                              "params": {"parentRequestId": parent, **params}})
             try:
-                return await asyncio.wait_for(future, CALL_TIMEOUT)
+                return await asyncio.wait_for(future, timeout)
             except TimeoutError as exc:
                 raise RPCError(-32000, "Host UI request timed out") from exc
         finally:
@@ -226,7 +245,8 @@ class Connection:
             shape(params, set())
             return {}
         if method == "initialize":
-            shape(params, {"protocolVersion", "client", "permissions", "context"})
+            shape(params, {"protocolVersion", "client", "permissions", "context"},
+                  {"optionalFeatures", "ui"})
             require(params["protocolVersion"] == "0.1", "Unsupported protocol version")
             shape(params["client"], {"name", "version"})
             require(all(isinstance(v, str) for v in params["client"].values()))
@@ -235,13 +255,34 @@ class Connection:
             context(params["context"])
             if self.initialized:
                 raise RPCError(-32000, "Already initialized")
-            self.permissions = set(params["permissions"]) & {"ui.confirm", "ui.notify"}
+            permissions = set(params["permissions"])
+            offered = params.get("optionalFeatures", [])
+            require(isinstance(offered, list) and all(isinstance(v, str) for v in offered))
+            require(len(set(offered)) == len(offered))
+            if "optionalFeatures" in params or "ui" in params:
+                require("ui.custom" in permissions)
+            ui_timeout = None
+            if "ui" in params:
+                shape(params["ui"], {"timeoutMs"})
+                timeout = params["ui"]["timeoutMs"]
+                require(type(timeout) is int and 1000 <= timeout <= 900000)
+            if "tui_v1" in offered:
+                require("ui" in params)
+                ui_timeout = params["ui"]["timeoutMs"] / 1000
+            self.permissions = permissions & {"ui.confirm", "ui.notify", "ui.custom"}
+            self.ui_timeout = ui_timeout
             self.initialized = True
+            if ui_timeout is not None:
+                return {**CATALOG, "features": ["tui_v1"],
+                        "commands": [*CATALOG["commands"], *UI_COMMANDS]}
             return CATALOG
-        if method not in {"tool.call", "command.execute", "hook.run"}:
+        if method not in {"tool.call", "command.execute", "hook.run", "ui.event"}:
             raise RPCError(-32601, "Method not found")
         if not self.initialized:
             raise RPCError(-32000, "Initialize first")
+        if method == "ui.event":
+            require(request_id is not None, "UI events must be requests")
+            return await self.ui_event(params)
         if method == "hook.run":
             shape(params, {"name", "event", "context"})
             context(params["context"])
@@ -263,7 +304,10 @@ class Connection:
         require(isinstance(params["name"], str))
         name, args = params["name"], params["arguments"]
         if method == "command.execute":
-            require(name == "hello" and isinstance(args, str))
+            require(isinstance(args, str))
+            if name in {"ui_form", "ui_counter"} and self.ui_timeout is not None:
+                return await self.ui_command(request_id, name)
+            require(name == "hello")
             return {"text": f"Hello, {args or 'world'}!"}
         if name == "greet":
             shape(args, {"name"})
@@ -299,6 +343,96 @@ class Connection:
             return {"content": [{"type": "text", "text": "Finished waiting."}], "details": {}}
         raise RPCError(-32602, "Unknown tool")
 
+    async def ui_command(self, parent: str | None, name: str) -> dict:
+        if parent is None or parent not in self.requests:
+            raise RPCError(-32001, "UI requires a live command request")
+        view_id = "view-" + uuid.uuid4().hex
+        view = View(parent, name)
+        self.views[view_id] = view
+        try:
+            result = await self.host_call(parent, "host.ui.open", {
+                "viewId": view_id, "title": "Deployment" if name == "ui_form" else "Counter",
+                "surface": "overlay",
+                "document": form_document() if name == "ui_form" else counter_document(0),
+            })
+            view.closing = True
+            # Open can settle before the close/update acknowledgement. Let an
+            # in-flight event finish before retiring its command parent.
+            async with view.lock:
+                pass
+            if (not isinstance(result, dict) or type(result.get("cancelled")) is not bool
+                    or (result["cancelled"] and (
+                        set(result) != {"cancelled", "reason"} or not isinstance(result["reason"], str)))
+                    or (not result["cancelled"] and (
+                        set(result) != {"cancelled", "result"} or not isinstance(result["result"], dict)))
+                    or len(encode(result).encode("utf-8")) > 16 * 1024):
+                raise RPCError(-32000, "Invalid UI result")
+            return {"text": "UI result: " + encode(result)}
+        finally:
+            view.closing = True
+            self.views.pop(view_id, None)
+
+    async def ui_event(self, params: Any) -> dict:
+        shape(params, {"parentRequestId", "viewId", "revision", "event"})
+        require(valid_id(params["parentRequestId"], "pi-"))
+        require(isinstance(params["viewId"], str)
+                and re.fullmatch(r"[A-Za-z0-9_-]{1,64}", params["viewId"]) is not None)
+        require(type(params["revision"]) is int and 0 <= params["revision"] <= 2**53 - 1)
+        event = params["event"]
+        require(isinstance(event, dict) and isinstance(event.get("type"), str))
+        kind = event["type"]
+        if kind == "resize":
+            shape(event, {"type", "width", "height"})
+            require(all(type(event[k]) is int and 0 < event[k] <= 2**53 - 1
+                        for k in ("width", "height")))
+        elif kind == "key":
+            shape(event, {"type", "key"})
+            require(safe_text(event["key"]) and 0 < len(event["key"]) <= 128)
+        elif kind == "text":
+            shape(event, {"type", "text"})
+            require(safe_text(event["text"]))
+        elif kind == "change":
+            shape(event, {"type", "id", "value"})
+            require(isinstance(event["id"], str) and safe_text(event["value"]))
+        else:
+            raise RPCError(-32602, "Unknown UI event")
+        view = self.views.get(params["viewId"])
+        if self.ui_timeout is None or view is None:
+            raise RPCError(-32001, "UI view is no longer active")
+        async with view.lock:
+            pending_open = self.reverse.get(view.open_request_id)
+            if (view.closing or self.views.get(params["viewId"]) is not view
+                    or params["parentRequestId"] != view.parent
+                    or view.parent not in self.requests or view.parent in self.cancelled
+                    or pending_open is None or pending_open[1].done()):
+                raise RPCError(-32001, "UI parent or view is no longer active")
+            require(params["revision"] == view.revision, "Invalid UI revision")
+            if kind == "change":
+                require(view.kind == "ui_form" and event["id"] in {"name", "target"})
+                require((event["id"] == "name" and len(event["value"]) <= 256)
+                        or (event["id"] == "target" and event["value"] in {"dev", "prod"}))
+            # The host owns all form editing, selection, and button submission.
+            if view.kind == "ui_counter" and kind == "key":
+                key = event["key"]
+                if key in {"up", "down"}:
+                    require(view.revision < 2**53 - 1, "UI revision limit reached")
+                    view.count += 1 if key == "up" else -1
+                    view.revision += 1
+                    result = await self.host_call(view.parent, "host.ui.update", {
+                        "viewId": params["viewId"], "revision": view.revision,
+                        "document": counter_document(view.count),
+                    })
+                    if result != {"applied": True} or type(result.get("applied")) is not bool:
+                        raise RPCError(-32000, "UI update was not applied")
+                elif key == "enter":
+                    view.closing = True
+                    result = await self.host_call(view.parent, "host.ui.close", {
+                        "viewId": params["viewId"], "result": {"count": view.count},
+                    })
+                    if result != {}:
+                        raise RPCError(-32000, "Invalid UI close response")
+            return {}
+
     async def close(self, graceful: bool = False) -> None:
         if self.closing:
             return
@@ -312,6 +446,10 @@ class Connection:
         self.reverse.clear()
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
+        self.views.clear()
+        self.ui_timeout = None
+        self.permissions.clear()
+        self.initialized = False
         self.requests.clear()
         self.started.clear()
         self.cancelled.clear()

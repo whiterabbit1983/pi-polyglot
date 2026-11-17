@@ -112,6 +112,67 @@ names differ from Pi's exposed `pg_<configured-id>_<contribution-name>` names.
 The example does not infer permission from the presence of a UI or implicitly
 approve a confirmation.
 
+## Opt-in hybrid TUI
+
+The additive [`tui_v1` contract](../../docs/tui-protocol.md) keeps base protocol
+version `0.1`. These commands require **interactive Pi TUI** and a host adapter
+that supports this feature. They do not work in Pi RPC, print, or headless mode;
+the host returns an unavailable error in those modes. The Python service never
+owns the terminal or sends raw ANSI sequences.
+
+Save this configuration outside the repository, replacing `/absolute/pi-polyglot`
+with your checkout path:
+
+```json
+{
+  "version": 1,
+  "extensions": [
+    {
+      "id": "python",
+      "transport": "stdio",
+      "command": "/absolute/pi-polyglot/examples/python/.venv/bin/python",
+      "args": ["/absolute/pi-polyglot/examples/python/server.py", "--transport", "stdio"],
+      "permissions": ["ui.notify", "ui.confirm", "ui.custom"],
+      "hooks": ["session_start", "before_agent_start", "tool_call"],
+      "uiTimeoutMs": 300000
+    }
+  ]
+}
+```
+
+From the repository root, start interactive Pi:
+
+```sh
+PI_POLYGLOT_CONFIG=/absolute/python-ui.json pi -e ./src/index.ts
+```
+
+Then run:
+
+```text
+/pg_python_ui_form
+/pg_python_ui_counter
+```
+
+- `ui_form` combines a styled frame with a local name input, target selector,
+  and Deploy button. Tab/shift-tab move focus. The host handles typing,
+  selection, and button submission without a remote editing round trip.
+- `ui_counter` starts at 0. Up/down send remote key requests and replace the
+  frame with increasing revisions. Enter closes with `{count:<number>}`.
+- Escape cancels either view locally. Both commands return
+  `UI result: ` followed by JSON of the open result, including cancellation.
+
+The same opt-in commands are available over HTTP/SSE and gRPC. Keep the existing
+transport settings and add `ui.custom` and, optionally, `uiTimeoutMs`.
+The host default is 300000 ms; the allowed range is 1000–900000 ms.
+The service uses the offered timeout only for command execution and
+`host.ui.open`; ordinary reverse callbacks keep their 30-second limit.
+
+Only a host with the `ui.custom` grant sends `optionalFeatures:["tui_v1"]` and
+`ui:{timeoutMs:...}` during initialization. The example selects the offered
+feature with `features:["tui_v1"]` and adds these 2 commands to its catalog.
+Without that offer, the legacy catalog stays unchanged, even if the permission
+is present. The catalog never changes after initialization.
+
 ## Concurrency, bounds, and failure handling
 
 `polyglot_example/core.py` owns a connection's permissions, pending requests,
@@ -121,12 +182,20 @@ handlers. Every callback uses the actual incoming request ID as
 `parentRequestId`; service IDs use the `ext-` prefix. Settlement, cancellation,
 timeout, and connection loss retire callback state.
 
+Custom views have generated IDs, a command parent, and per-view event locks.
+`host.ui.open` stays pending while independent `ui.event` **requests** run;
+notifications cannot modify a view. Counter updates and close callbacks retain
+the command ID, never the event request ID. Invalid revisions, foreign parents,
+and late events fail. Command completion/cancellation retires the view in a
+`finally` block; disconnect clears view and negotiated connection state.
+
 Limits are explicit:
 
 - 1 MiB of UTF-8 JSON per frame, excluding stdio LF or the SSE wrapper;
 - 32 active handlers and 32 queued outgoing frames per connection;
 - 128 HTTP sessions or active gRPC streams per server;
-- 30-second reverse-callback timeout;
+- 30-second reverse-callback timeout, except negotiated custom UI open;
+- offered `ui.timeoutMs` for commands and custom UI open on opted-in connections;
 - 5-second output queue/write timeout; slow consumers lose their connection.
 
 Malformed framing or envelopes close a connection; request parameter failures
@@ -184,8 +253,12 @@ for all 3 transports. It covers the catalog, argument validation, reverse-call
 success/rejection/failure/timeout, concurrent requests during confirmation,
 progress, cancellation races, all no-op hooks, auth, frame/queue limits, EOF,
 SSE stream loss, session isolation, and per-connection shutdown. It makes no
-model calls. Tests use ephemeral loopback ports; a rare port-allocation race with
-another process is possible.
+model calls. The UI tests also cover opt-in negotiation, exact legacy catalog
+preservation, fake-host form submission and counter open/update/close exchanges
+over all 3 transports, request concurrency, invalid/late events, cancellation,
+deadlines, and cleanup. These are protocol-host tests, not a real Pi terminal or
+PTY rendering check. Tests use ephemeral loopback ports; a rare port-allocation
+race with another process is possible.
 
 The build writes a wheel and source archive to `dist/` without publishing them.
 `python -m polyglot_example` is an alternative entry point from this directory;

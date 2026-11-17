@@ -8,6 +8,7 @@ import { Peer, type Transport } from '../../src/rpc.ts';
 import { MAX_BYTES, RpcError, VERSION } from '../../src/protocol.ts';
 import { Lines, SerialWriter } from '../../src/transports/framing.ts';
 import { grpcDefinition } from '../../src/transports/grpc.ts';
+import { UiDemo, uiCommands } from './ui-demo.ts';
 
 export const catalog = {
   protocolVersion: VERSION, name: 'typescript_demo',
@@ -22,12 +23,16 @@ const text = (value: string) => ({ content: [{ type: 'text', text: value }], det
 function service(transport: Transport) {
   const peer = new Peer(transport, 'ext-');
   let initialized = false;
+  const ui = new UiDemo(peer);
   peer.handler = async (method, params, id, signal) => {
     if (method === 'initialize') {
       if (initialized || params.protocolVersion !== VERSION) throw new RpcError(-32602, 'Unsupported initialization');
-      initialized = true; return catalog;
+      ui.configure(params);
+      initialized = true;
+      return ui.enabled ? { ...catalog, features: ['tui_v1'], commands: [...catalog.commands, ...uiCommands] } : catalog;
     }
     if (!initialized) throw new RpcError(-32000, 'Initialize first');
+    if (method === 'ui.event') return ui.event(params);
     if (method === 'tool.call') {
       if (params.name === 'greet') {
         const parsed = z.object({ name: z.string().max(100) }).strict().safeParse(params.arguments);
@@ -52,6 +57,8 @@ function service(transport: Transport) {
       throw new RpcError(-32602, 'Unknown tool');
     }
     if (method === 'command.execute') {
+      if (typeof params.arguments !== 'string') throw new RpcError(-32602, 'Invalid command');
+      if (params.name === 'ui_form' || params.name === 'ui_counter') return ui.command(params.name, id, signal);
       if (params.name !== 'hello' || typeof params.arguments !== 'string') throw new RpcError(-32602, 'Invalid command');
       return { text: `Hello, ${params.arguments || 'world'}!` };
     }

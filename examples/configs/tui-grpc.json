@@ -1,0 +1,23 @@
+{
+  "version": 1,
+  "extensions": [
+    {
+      "id": "demo",
+      "transport": "grpc",
+      "permissions": [
+        "ui.notify",
+        "ui.confirm",
+        "ui.custom"
+      ],
+      "hooks": [
+        "session_start",
+        "before_agent_start",
+        "tool_call"
+      ],
+      "uiTimeoutMs": 300000,
+      "address": "127.0.0.1:8766",
+      "tls": false,
+      "tokenEnv": "POLYGLOT_TOKEN"
+    }
+  ]
+}

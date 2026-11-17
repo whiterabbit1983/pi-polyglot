@@ -10,6 +10,11 @@ use tokio::{
     task::JoinSet,
 };
 use tokio_util::sync::CancellationToken;
+#[path = "ui.rs"]
+mod ui;
+#[cfg(test)]
+#[path = "ui_tests.rs"]
+mod ui_tests;
 
 pub const MAX_FRAME: usize = 1024 * 1024;
 pub const QUEUE: usize = 32;
@@ -48,6 +53,8 @@ impl Connection {
             callbacks: Mutex::new(HashMap::new()),
             active: Mutex::new(HashMap::new()),
             permissions: Mutex::new(None),
+            ui_timeout: Mutex::new(None),
+            views: Mutex::new(HashMap::new()),
         });
         tokio::spawn(run(rx, state));
         Self {
@@ -63,6 +70,8 @@ struct State {
     callbacks: Mutex<HashMap<String, oneshot::Sender<RpcResult>>>,
     active: Mutex<HashMap<String, CancellationToken>>,
     permissions: Mutex<Option<HashSet<String>>>,
+    ui_timeout: Mutex<Option<Duration>>,
+    views: Mutex<HashMap<String, ui::View>>,
 }
 impl State {
     async fn send(&self, value: Value) -> bool {
@@ -112,18 +121,35 @@ impl State {
             state: self.clone(),
             id: id.clone(),
         };
-        if !self.active.lock().unwrap().contains_key(parent) {
+        let parent_token = self
+            .active
+            .lock()
+            .unwrap()
+            .get(parent)
+            .cloned()
+            .ok_or_else(cancelled)?;
+        if parent_token.is_cancelled() {
             return Err(cancelled());
         }
+        let timeout = if method == "host.ui.open" {
+            self.ui_timeout.lock().unwrap().ok_or_else(invalid)?
+        } else {
+            CALLBACK_TIMEOUT
+        };
         if !self
             .send(json!({"jsonrpc":"2.0","id":id,"method":method,"params":params}))
             .await
         {
             return Err(failed("Connection closed"));
         }
-        match tokio::time::timeout(CALLBACK_TIMEOUT, rx).await {
-            Ok(Ok(result)) => result,
-            _ => Err(failed("Host callback timed out")),
+        tokio::select! {
+            biased;
+            // close can settle open and its command before its acknowledgement.
+            _ = parent_token.cancelled(), if method != "host.ui.close" => Err(cancelled()),
+            result = tokio::time::timeout(timeout, rx) => match result {
+                Ok(Ok(result)) => result,
+                _ => Err(failed("Host callback timed out")),
+            }
         }
     }
 }
@@ -218,17 +244,26 @@ async fn run(mut input: mpsc::Receiver<String>, state: Arc<State>) {
                 .lock()
                 .unwrap()
                 .insert(id.clone(), token.clone());
+            let timeout = if method == "command.execute" {
+                state.ui_timeout.lock().unwrap().unwrap_or(REQUEST_TIMEOUT)
+            } else {
+                REQUEST_TIMEOUT
+            };
             let state = state.clone();
             let method = method.to_owned();
             tasks.spawn(async move {
                 let result = tokio::select! {
                     biased;
                     _ = token.cancelled() => Err(cancelled()),
-                    result = tokio::time::timeout(REQUEST_TIMEOUT, handle(&state, &id, &method, params)) =>
+                    result = tokio::time::timeout(timeout, handle(&state, &id, &method, params)) =>
                         result.unwrap_or_else(|_| Err(failed("Request timed out"))),
                 };
                 // Drop the handler (and its callback guard) before retiring its parent.
                 state.active.lock().unwrap().remove(&id);
+                if method == "command.execute" && state.ui_timeout.lock().unwrap().is_some() {
+                    // Retire in-flight update handlers when their UI command settles.
+                    token.cancel();
+                }
                 state.reply(&id, result).await;
             });
         } else {
@@ -261,6 +296,7 @@ async fn run(mut input: mpsc::Receiver<String>, state: Arc<State>) {
     while tasks.join_next().await.is_some() {}
     state.callbacks.lock().unwrap().clear();
     state.active.lock().unwrap().clear();
+    state.views.lock().unwrap().clear();
     // Dropping the last writer closes the output only after the queued shutdown reply is drained.
 }
 
@@ -288,7 +324,7 @@ fn initialize(state: &State, params: &Value) -> RpcResult {
     exact_object(
         params,
         &["protocolVersion", "client", "permissions", "context"],
-        &[],
+        &["optionalFeatures", "ui"],
     )?;
     if params["protocolVersion"] != "0.1" {
         return Err(invalid());
@@ -307,8 +343,18 @@ fn initialize(state: &State, params: &Value) -> RpcResult {
     if current.is_some() {
         return Err(failed("Already initialized"));
     }
+    let timeout = ui::negotiate(params, &permissions)?;
+    *state.ui_timeout.lock().unwrap() = timeout;
     *current = Some(permissions);
-    Ok(catalog())
+    let mut result = catalog();
+    if timeout.is_some() {
+        result["features"] = json!(["tui_v1"]);
+        result["commands"].as_array_mut().unwrap().extend([
+            json!({"name":"ui_form","description":"Open a local deployment form"}),
+            json!({"name":"ui_counter","description":"Open a remote counter"}),
+        ]);
+    }
+    Ok(result)
 }
 
 pub fn catalog() -> Value {
@@ -328,13 +374,17 @@ pub fn catalog() -> Value {
 }
 
 async fn handle(state: &Arc<State>, id: &str, method: &str, params: Value) -> RpcResult {
-    if !matches!(method, "tool.call" | "command.execute" | "hook.run") {
+    if !matches!(
+        method,
+        "tool.call" | "command.execute" | "hook.run" | "ui.event"
+    ) {
         return Err(RpcError(-32601, "Method not found"));
     }
     if state.permissions.lock().unwrap().is_none() {
         return Err(failed("Initialize first"));
     }
     match method {
+        "ui.event" => ui::event(state, params).await,
         "tool.call" => {
             exact_object(&params, &["name", "arguments", "context"], &[])?;
             context(&params["context"])?;
@@ -398,10 +448,14 @@ async fn handle(state: &Arc<State>, id: &str, method: &str, params: Value) -> Rp
         "command.execute" => {
             exact_object(&params, &["name", "arguments", "context"], &[])?;
             context(&params["context"])?;
-            if params["name"] != "hello" {
+            let args = params["arguments"].as_str().ok_or_else(invalid)?;
+            let name = params["name"].as_str().ok_or_else(invalid)?;
+            if matches!(name, "ui_form" | "ui_counter") {
+                return ui::command(state, id, name).await;
+            }
+            if name != "hello" {
                 return Err(invalid());
             }
-            let args = params["arguments"].as_str().ok_or_else(invalid)?;
             let who = if args.is_empty() { "world" } else { args };
             Ok(json!({"text":format!("Hello, {who}!")}))
         }

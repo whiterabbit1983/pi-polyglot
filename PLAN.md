@@ -79,3 +79,53 @@ Pi creates a connection with `POST /sessions`, opens `GET /sessions/{id}/events`
 `README.md` gives installation, transport choice and quick start. `docs/protocol.md` is normative for v0.1. `docs/security.md` states trust and failure behavior. `examples/{python,go,typescript,rust}/README.md` provide build/run commands, dependencies and how to write a new tool or hook. `CHANGELOG.md` records the initial scope. GitHub Actions builds and tests the matrix where practical.
 
 The final report lists the repository URL, completed test results, exact known limitations and anything not tested. A public push is publication, not proof of production hardening.
+
+## 8. v0.2 hybrid TUI — implementation plan
+
+The v0.1 implementation is published; its Linux CI passed. This milestone adds an opt-in `tui_v1` feature without breaking legacy protocol 0.1 services. Package version becomes 0.2.0; the existing base wire version stays 0.1. A host offers extra initialization fields only when `ui.custom` is explicitly granted, and a service must select `tui_v1` before custom UI is available.
+
+### Scope and architecture
+
+- A synchronous local Pi `ctx.ui.custom()` component renders cached data. External services never own the terminal, raw mode or arbitrary ANSI output.
+- One shared UI document supports safe styled text frames, local input/select/button widgets, tables and trees. A column can combine frame content and local controls: this is the hybrid mode, not two unrelated UI systems.
+- Local input editing/selection/focus remains responsive without a network round trip; remote key events and server updates support custom screens. Safe semantic style spans replace raw escape sequences.
+- Initial surfaces: temporary inline custom screens and overlays. Persistent widgets, header/footer/editor replacement, arbitrary existing TypeScript component execution, PTY emulation and direct curses/Bubble Tea compatibility remain out of scope.
+- Keyboard, bracketed paste, focus and cursor handling; resize notifications and width-safe Unicode rendering; a local Escape path always closes the UI. Mouse is not advertised until its event contract is implemented and tested.
+- Custom UI requires interactive TUI mode. RPC/print/headless requests return an explicit unavailable error, never fake a working screen.
+
+### Wire and lifetime
+
+- Add `host.ui.open`, `host.ui.update`, `host.ui.close` and host-to-service `ui.event` requests. A service chooses a view ID scoped to its live parent; open resolves when that view completes.
+- Monotonic document revisions reject stale updates. Validate document size, depth, unique control IDs, line/spans counts and strings. Restrict terminal control characters and styles.
+- A dedicated configurable `uiTimeoutMs` bounds interactive commands/open requests; ordinary hooks keep their existing timeout. An open request cannot outlive its parent, connection or Pi session.
+- Exactly one custom view can own the adapter's interactive slot across connections. Bounded/coalesced event delivery prevents unbounded updates. Cancel, disconnect, shutdown, rendering errors and remote handler failure dispose the component and settle all outstanding work.
+
+### Implementation sequence
+
+1. Update this plan and freeze `docs/tui-protocol.md`.
+2. Implement UI schema, local hybrid component, event/lifetime manager and feature negotiation.
+3. Add opt-in frame and form demos to all four language examples, retaining legacy catalogs and the existing 12-case matrix.
+4. Add pure component tests, mocked Pi integration/lifecycle tests, all-transport UI interaction tests and a real Pi PTY smoke (no model inference).
+5. Run existing tests plus new tests, independent review, update both READMEs/security/changelog/verification, then commit and push.
+
+### Acceptance and boundaries
+
+- Hybrid frame + local field/select submission and a remotely updated counter work on every transport.
+- Local text edits work even while remote event handling is delayed; frame updates preserve focused input values when IDs/types survive.
+- Narrow terminals, emoji/combining characters, theme invalidation, cursor positioning, stale updates and forbidden escape sequences have tests.
+- Denied capability, wrong mode, wrong parent/view, timeout, late updates, cancellation and disconnect fail safely with no retained view.
+- Actual TUI execution is checked with a PTY if the environment supports it. Otherwise explicitly report the missing acceptance check; do not equate mocked render tests with real terminal acceptance.
+- Document exact supported widgets/input behavior rather than claiming full Pi TUI or arbitrary terminal-application compatibility.
+
+### Implementation status
+
+- [x] Specification, permissions, feature negotiation and independently bounded interaction lifetime.
+- [x] Safe hybrid documents, local controls, remote frames, event queue, revisions and teardown.
+- [x] Both demos in all 4 languages on all 3 transports; old catalogs still work without UI opt-in.
+- [x] 42 TypeScript regression tests; 12 legacy and 12 hybrid matrix cases pass locally.
+- [x] Actual Pi PTY checks in regular and fullscreen modes: overlay counter, inline form at 10 rows, resize, keyboard, Escape and shutdown. No model call.
+- [x] Python 49 tests; Go race/vet/build; Rust 11 unit + 4 smoke, fmt and clippy.
+- [x] Independent review fixes: internal cursor initialization must ignore user keybindings; inline height must reserve footer/widgets and reject input if no visible space remains.
+- [x] Public protocol, READMEs, security notes, verification report, changelog and CI updated.
+
+The inline viewport uses the public mounted component tree. Pi does not expose an allocated inline-height getter. Fullscreen accounting is conservative: unusually tall dock widgets can close the inline view rather than accept hidden input. Use overlays when the dock is crowded. Hosted CI status is recorded in GitHub Actions, separately from the local results above.

@@ -10,7 +10,7 @@ export type RequestOptions = {
   signal?: AbortSignal; timeoutMs?: number; meta?: unknown;
   onProgress?: (params: Params) => void;
 };
-type Pending = { resolve: (value: unknown) => void; reject: (error: Error) => void; cleanup: () => void; options: RequestOptions; controller: AbortController };
+type Pending = { method: string; resolve: (value: unknown) => void; reject: (error: Error) => void; cleanup: () => void; options: RequestOptions; controller: AbortController };
 export type Handler = (method: string, params: Params, id: string, signal: AbortSignal) => Promise<unknown>;
 
 export class Peer {
@@ -20,6 +20,7 @@ export class Peer {
   private ended?: Error;
   private closing?: Promise<void>;
   handler: Handler = async () => { throw new RpcError(-32601, 'Method not found'); };
+  incomingTimeout: (method: string) => number = () => this.timeoutMs;
   constructor(readonly transport: Transport, private prefix = 'pi-', readonly timeoutMs = 30000) {
     transport.onMessage = data => { void this.receive(data).catch(error => this.fail(error)); };
     transport.onClose = error => this.fail(error);
@@ -43,7 +44,7 @@ export class Peer {
       };
       const abort = () => retire(new RpcError(-32800, 'Request cancelled'));
       const timer = setTimeout(() => retire(new RpcError(-32000, 'Request deadline exceeded')), options.timeoutMs ?? this.timeoutMs);
-      this.pending.set(id, { resolve, reject, options, controller, cleanup: () => { clearTimeout(timer); options.signal?.removeEventListener('abort', abort); } });
+      this.pending.set(id, { method, resolve, reject, options, controller, cleanup: () => { clearTimeout(timer); options.signal?.removeEventListener('abort', abort); } });
       options.signal?.addEventListener('abort', abort, { once: true });
       try { void this.transport.send(data).catch(error => this.fail(error)); }
       catch (error) { this.fail(error as Error); }
@@ -78,7 +79,7 @@ export class Peer {
     }
     const controller = new AbortController();
     this.incoming.set(message.id, controller);
-    const timer = setTimeout(() => controller.abort(), this.timeoutMs);
+    const timer = setTimeout(() => controller.abort(), this.incomingTimeout(message.method));
     try {
       // Do not await this handler on the transport reader: callbacks are bidirectional.
       const work = this.handler(message.method, params, message.id, controller.signal);

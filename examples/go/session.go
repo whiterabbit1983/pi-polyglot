@@ -31,11 +31,13 @@ type session struct {
 	pending     map[string]chan envelope
 	serial      uint64
 	workers     int
+	uiTimeout   time.Duration // zero means tui_v1 was not selected
+	views       map[string]*uiView
 }
 
 func newSession() *session {
 	ctx, cancel := context.WithCancel(context.Background())
-	return &session{ctx: ctx, cancel: cancel, out: make(chan output, queueSize), permissions: map[string]bool{}, active: map[string]*request{}, seen: map[string]bool{}, pending: map[string]chan envelope{}}
+	return &session{ctx: ctx, cancel: cancel, out: make(chan output, queueSize), permissions: map[string]bool{}, active: map[string]*request{}, seen: map[string]bool{}, pending: map[string]chan envelope{}, views: map[string]*uiView{}}
 }
 func (s *session) close() { s.cancel() }
 
@@ -148,6 +150,10 @@ func (s *session) accept(data []byte) error {
 		return nil
 	}
 	ctx, cancel := context.WithCancel(s.ctx)
+	if e.Method == "command.execute" && s.uiTimeout > 0 {
+		cancel()
+		ctx, cancel = context.WithTimeout(s.ctx, s.uiTimeout)
+	}
 	r := &request{ctx, cancel, e.Method}
 	if e.HasID {
 		s.active[e.ID] = r
@@ -160,6 +166,7 @@ func (s *session) accept(data []byte) error {
 		defer s.mu.Unlock()
 		s.workers--
 		delete(s.active, e.ID)
+		delete(s.views, e.ID)
 		if ctx.Err() != nil {
 			result, failure = nil, cancelled()
 		}
@@ -175,7 +182,7 @@ func (s *session) initialize(raw json.RawMessage) (any, *rpcError) {
 	if s.initialized {
 		return nil, failed("Already initialized")
 	}
-	m, err := object(raw, []string{"protocolVersion", "client", "permissions", "context"}, nil)
+	m, err := object(raw, []string{"protocolVersion", "client", "permissions", "context"}, []string{"optionalFeatures", "ui"})
 	var version string
 	if err != nil || !stringValue(m["protocolVersion"], &version) || version != "0.1" || !contextOK(m["context"]) {
 		return nil, invalid()
@@ -197,15 +204,32 @@ func (s *session) initialize(raw json.RawMessage) (any, *rpcError) {
 		}
 		validated[permission] = true
 	}
+	timeout, failure := negotiateUI(m, validated)
+	if failure != nil {
+		return nil, failure
+	}
 	s.permissions = validated
+	s.uiTimeout = timeout
 	s.initialized = true
-	return catalog(), nil
+	result := catalog()
+	if timeout > 0 {
+		result["features"] = []string{"tui_v1"}
+		result["commands"] = append(result["commands"].([]any),
+			map[string]any{"name": "ui_form", "description": "Open a local deployment form"},
+			map[string]any{"name": "ui_counter", "description": "Open a remote counter"})
+	}
+	return result, nil
 }
 
 func (s *session) reverse(ctx context.Context, parent, method string, params map[string]any) (json.RawMessage, *rpcError) {
 	s.mu.Lock()
-	permission := map[string]string{"host.ui.confirm": "ui.confirm", "host.ui.notify": "ui.notify"}[method]
-	if s.active[parent] == nil || ctx.Err() != nil || s.closing {
+	permission := map[string]string{"host.ui.confirm": "ui.confirm", "host.ui.notify": "ui.notify", "host.ui.open": "ui.custom", "host.ui.update": "ui.custom", "host.ui.close": "ui.custom"}[method]
+	r := s.active[parent]
+	if r == nil || r.ctx.Err() != nil || ctx.Err() != nil || s.closing {
+		s.mu.Unlock()
+		return nil, cancelled()
+	}
+	if permission == "ui.custom" && (s.uiTimeout == 0 || r.method != "command.execute") {
 		s.mu.Unlock()
 		return nil, cancelled()
 	}
@@ -221,10 +245,22 @@ func (s *session) reverse(ctx context.Context, parent, method string, params map
 	s.enqueue(map[string]any{"jsonrpc": "2.0", "id": id, "method": method, "params": params}, false)
 	s.mu.Unlock()
 	defer func() { s.mu.Lock(); delete(s.pending, id); s.mu.Unlock() }()
-	timer := time.NewTimer(30 * time.Second)
+	timeout := 30 * time.Second
+	if method == "host.ui.open" {
+		timeout = s.uiTimeout
+	}
+	timer := time.NewTimer(timeout)
 	defer timer.Stop()
+	parentDone := r.ctx.Done()
+	// close can complete open (and its command) before its own acknowledgement.
+	// The event context and callback timeout still bound this final acknowledgement.
+	if method == "host.ui.close" {
+		parentDone = nil
+	}
 	select {
 	case <-ctx.Done():
+		return nil, cancelled()
+	case <-parentDone:
 		return nil, cancelled()
 	case <-timer.C:
 		return nil, failed("Host callback timed out")
@@ -246,6 +282,8 @@ func (s *session) progress(id, text string) {
 
 func (s *session) handle(ctx context.Context, e envelope) (any, *rpcError) {
 	switch e.Method {
+	case "ui.event":
+		return s.uiEvent(ctx, e)
 	case "tool.call":
 		m, err := object(e.Params, []string{"name", "arguments", "context"}, nil)
 		var name string
@@ -313,7 +351,13 @@ func (s *session) handle(ctx context.Context, e envelope) (any, *rpcError) {
 	case "command.execute":
 		m, err := object(e.Params, []string{"name", "arguments", "context"}, nil)
 		var name, args string
-		if err != nil || !stringValue(m["name"], &name) || name != "hello" || !stringValue(m["arguments"], &args) || !contextOK(m["context"]) {
+		if err != nil || !stringValue(m["name"], &name) || !stringValue(m["arguments"], &args) || !contextOK(m["context"]) {
+			return nil, invalid()
+		}
+		if name == "ui_form" || name == "ui_counter" {
+			return s.uiCommand(ctx, e.ID, name)
+		}
+		if name != "hello" {
 			return nil, invalid()
 		}
 		return map[string]any{"text": hello(args)}, nil

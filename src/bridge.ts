@@ -7,19 +7,24 @@ import { catalogSchema, commandResult, parseHookResult, RpcError, textParts, too
 import { StdioTransport } from './transports/stdio.ts';
 import { HttpTransport } from './transports/http.ts';
 import { GrpcTransport } from './transports/grpc.ts';
+import { UiManager } from './ui/manager.ts';
 
 const reverseBase = { parentRequestId: z.string().min(1).max(128) };
 const notifyParams = z.object({ ...reverseBase, message: z.string().max(65536), level: z.enum(['info', 'warning', 'error']).default('info') }).strict();
 const confirmParams = z.object({ ...reverseBase, title: z.string().max(1024), message: z.string().max(65536) }).strict();
-export type HostContext = Pick<ExtensionContext, 'cwd' | 'hasUI' | 'ui'> & { signal?: AbortSignal };
+export type HostContext = Pick<ExtensionContext, 'cwd' | 'hasUI' | 'ui'> & { signal?: AbortSignal; mode?: ExtensionContext['mode'] };
 
 export class Bridge {
   catalog!: Catalog;
   private validators = new Map<string, ValidateFunction>();
   private stopping?: Promise<void>;
+  private ui: UiManager;
   constructor(readonly config: Connection, readonly peer: Peer) {
+    this.ui = new UiManager(peer, config.timeoutMs);
     peer.handler = (method, params, _id, signal) => this.reverse(method, params, signal);
+    peer.incomingTimeout = method => method === 'host.ui.open' && this.customUiEnabled ? config.uiTimeoutMs : config.timeoutMs;
   }
+  get customUiEnabled() { return this.config.permissions.includes('ui.custom') && this.catalog?.features?.includes('tui_v1') === true; }
   static async connect(config: Connection, cwd: string) {
     const transport = config.transport === 'stdio' ? new StdioTransport(config)
       : config.transport === 'http' ? await HttpTransport.connect(config) : new GrpcTransport(config);
@@ -29,9 +34,11 @@ export class Bridge {
   }
   async initialize(cwd: string) {
     this.catalog = catalogSchema.parse(await this.peer.request('initialize', {
-      protocolVersion: VERSION, client: { name: 'pi-polyglot', version: '0.1.0' },
+      protocolVersion: VERSION, client: { name: 'pi-polyglot', version: '0.2.0' },
       permissions: this.config.permissions, context: { cwd },
+      ...(this.config.permissions.includes('ui.custom') ? { optionalFeatures: ['tui_v1'], ui: { timeoutMs: this.config.uiTimeoutMs } } : {}),
     }));
+    if (this.catalog.features?.length && !this.config.permissions.includes('ui.custom')) throw new Error('Service selected an unoffered UI feature');
     for (const hook of this.catalog.hooks) {
       if (!this.config.hooks.includes(hook)) throw new Error(`Hook ${hook} requires explicit permission for ${this.config.id}`);
     }
@@ -74,12 +81,22 @@ export class Bridge {
     return { ...parsed, details: parsed.details ?? {} };
   }
   async command(name: string, args: string, ctx: HostContext) {
-    return commandResult.parse(await this.peer.request('command.execute', { name, arguments: args, context: { cwd: ctx.cwd } }, { meta: ctx, signal: ctx.signal }));
+    return commandResult.parse(await this.peer.request('command.execute', { name, arguments: args, context: { cwd: ctx.cwd } }, {
+      meta: ctx, signal: ctx.signal, timeoutMs: this.customUiEnabled ? this.config.uiTimeoutMs : this.config.timeoutMs,
+    }));
   }
   async hook(name: Hook, event: Params, ctx: HostContext) {
     return parseHookResult(name, await this.peer.request('hook.run', { name, event, context: { cwd: ctx.cwd } }, { meta: ctx, signal: ctx.signal }));
   }
   private async reverse(method: string, params: Params, signal: AbortSignal) {
+    if (['host.ui.open', 'host.ui.update', 'host.ui.close'].includes(method)) {
+      if (!this.customUiEnabled) throw new RpcError(-32001, 'Custom UI feature is not granted and negotiated');
+      const parent = typeof params.parentRequestId === 'string' ? this.peer.parent(params.parentRequestId) : undefined;
+      if (!parent || parent.method !== 'command.execute' || parent.controller.signal.aborted) throw new RpcError(-32001, 'Custom UI requires a live command parent');
+      const ctx = parent.options.meta as HostContext | undefined;
+      if (!ctx) throw new RpcError(-32001, 'UI context unavailable');
+      return this.ui.handle(method, params, ctx, AbortSignal.any([signal, parent.controller.signal]));
+    }
     if (method !== 'host.ui.notify' && method !== 'host.ui.confirm') throw new RpcError(-32601, 'Unknown host method');
     const permission = method.slice(5) as 'ui.notify' | 'ui.confirm';
     if (!this.config.permissions.includes(permission)) throw new RpcError(-32001, 'Host permission denied');
@@ -102,6 +119,7 @@ export class Bridge {
   }
   shutdown() {
     return this.stopping ??= (async () => {
+      this.ui.dispose();
       try { if (!this.peer.isClosed) await this.peer.request('shutdown', {}, { timeoutMs: 1000 }); }
       catch { /* Cleanup is mandatory even without acknowledgement. */ }
       finally { await this.peer.close(); }
